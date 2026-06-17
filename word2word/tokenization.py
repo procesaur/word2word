@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 
 from collections import Counter, defaultdict
-from itertools import chain, islice, product, repeat
+from itertools import chain, product
 from multiprocessing import Pool
 import operator
-import re
 from tqdm import tqdm
 
 
