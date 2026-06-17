@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
-import pickle
+from json import dump, load
 from time import time
 
 from word2word.utils import (
@@ -11,7 +11,7 @@ from word2word.tokenization import (
     load_tokenizer, get_vocab, update_dicts
 )
 from word2word.methods import (
-    rerank, rerank_mp, get_trans_co, get_trans_pmi
+    rerank, rerank_mp, get_trans_pmi
 )
 
 
@@ -58,12 +58,12 @@ class Word2word:
         try:
             x = self.word2x[query]
             ys = self.x2ys[x]
-            words = [self.y2word[y] for y in ys]
+            words = {self.y2word[y[0]] : y[1] for y in ys[:n_best]}
         except KeyError:
             raise KeyError(
                 f"query word {query} not found in the bilingual lexicon."
             )
-        return words[:n_best]
+        return words
 
     def __len__(self):
         """Return the number of source words for which translation exists."""
@@ -94,7 +94,6 @@ class Word2word:
             rerank_width: int = 100,
             rerank_impl: str = "multiprocessing",
             n_translations: int = 10,
-            save_cooccurrence: bool = False,
             save_pmi: bool = False,
             savedir: str = None,
             num_workers: int = 16,
@@ -144,18 +143,8 @@ class Word2word:
         Word2word.save(lang1, lang2, savedir, word2x, word2y, x2word,
                        x2ys_cpe, y2word, y2xs_cpe)
 
-        if save_cooccurrence:
-            print("Step 5-1. Translation using co-occurrence counts")
-            subdir = os.path.join(savedir, "co")
-            os.makedirs(subdir, exist_ok=True)
-
-            x2ys_co = get_trans_co(x2ys, n_translations)
-            y2xs_co = get_trans_co(y2xs, n_translations)
-            Word2word.save(lang1, lang2, subdir, word2x, word2y, x2word,
-                           x2ys_co, y2word, y2xs_co)
-
         if save_pmi:
-            print("Step 5-2. Translation using PMI scores")
+            print("Step 5-1. Translation using PMI scores")
             subdir = os.path.join(savedir, "pmi")
             os.makedirs(subdir, exist_ok=True)
             Nx = sum(seqlens1)
@@ -176,10 +165,56 @@ class Word2word:
 
     @staticmethod
     def save(lang1, lang2, savedir, word2x, word2y, x2word, x2ys, y2word, y2xs):
-        with open(os.path.join(savedir, f"{lang1}-{lang2}.pkl"), "wb") as f:
-            pickle.dump((word2x, y2word, x2ys), f)
-        with open(os.path.join(savedir, f"{lang2}-{lang1}.pkl"), "wb") as f:
-            pickle.dump((word2y, x2word, y2xs), f)
+
+        def _dump_json(path, src_vocab, tgt_vocab, translations, src_lang, tgt_lang,
+                    id2word_src, id2word_tgt):
+            """Helper to write bilingual dictionary JSON with words instead of IDs."""
+            norm_translations = {}
+            for src_id, tgts in translations.items():
+                if not tgts:
+                    norm_translations[id2word_src[int(src_id)]] = []
+                    continue
+                
+
+
+                norm_translations[id2word_src[int(src_id)]] = [
+                    {id2word_tgt[int(tgt)]: float(score)}
+                    for tgt, score in tgts
+                ]
+
+            data = {
+                "src_lang": src_lang,
+                "tgt_lang": tgt_lang,
+                "src_vocab": src_vocab,
+                "tgt_vocab": tgt_vocab,
+                "translations": norm_translations
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                dump(data, f, ensure_ascii=False, indent=2)
+
+        # lang1 → lang2
+        _dump_json(
+            os.path.join(savedir, f"{lang1}-{lang2}.json"),
+            src_vocab=word2x,
+            tgt_vocab=word2y,
+            translations=x2ys,
+            src_lang=lang1,
+            tgt_lang=lang2,
+            id2word_src=x2word,
+            id2word_tgt=y2word
+        )
+
+        # lang2 → lang1
+        _dump_json(
+            os.path.join(savedir, f"{lang2}-{lang1}.json"),
+            src_vocab=word2y,
+            tgt_vocab=word2x,
+            translations=y2xs,
+            src_lang=lang2,
+            tgt_lang=lang1,
+            id2word_src=y2word,
+            id2word_tgt=x2word
+        )
 
     @classmethod
     def load(cls, lang1, lang2):
@@ -189,10 +224,26 @@ class Word2word:
         built from the make function.
         """
         savedir = get_savedir()
-        path = os.path.join(savedir, f"{lang1}-{lang2}.pkl")
+        path = os.path.join(savedir, f"{lang1}-{lang2}.json")
         assert os.path.exists(path), \
             f"processed lexicon file not found at {path}"
-        with open(path, "rb") as f:
-            word2x, y2word, x2ys = pickle.load(f)
+        with open(path, "r", encoding="utf-8") as f:
+            data = load(f)
+
         print(f"Loaded word2word custom bilingual lexicon from {path}")
-        return cls(lang1, lang2, word2x, y2word, x2ys)
+
+        word2x = data["src_vocab"]
+        word2y = data["tgt_vocab"]
+        y2word = {y:x for x,y in word2y.items()}
+
+        # Rebuild translations into list of (target, score) tuples
+        x2ys = {}
+        for src, entries in data["translations"].items():
+            l = []
+            for entry in entries:
+                key = next(iter(entry))
+                l.append((word2y[key], entry[key]))
+
+            x2ys[word2x[src]] = l
+
+        return cls(data["src_lang"], data["tgt_lang"], word2x, y2word, x2ys)

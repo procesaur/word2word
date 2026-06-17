@@ -63,5 +63,7 @@ def main():
 
 
 if __name__ == "__main__":
-    Word2word.make(lang1="sr",lang2="hr")
+    Word2word.make(lang1="sr", lang2="hr")
+    srhr = Word2word.load(lang1="sr", lang2="hr")
+    print(srhr("fudbal"))
     #main()
