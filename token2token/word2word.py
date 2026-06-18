@@ -1,18 +1,11 @@
 # -*- coding: utf-8 -*-
-
 import os
 from json import dump, load
 from time import time
 
-from word2word.utils import (
-    download_or_load, build_dataset, get_savedir
-)
-from word2word.tokenization import (
-    load_tokenizer, get_vocab, update_dicts
-)
-from word2word.methods import (
-    rerank, rerank_mp, get_trans_pmi
-)
+from token2token.utils import build_dataset, get_savedir
+from token2token.tokenization import load_word_tokenizer, get_vocab, update_dicts
+from token2token.methods import rerank, rerank_mp, get_trans_pmi
 
 
 class Word2word:
@@ -31,27 +24,43 @@ class Word2word:
         my_en2fr = Word2word.make("en", "fr", "my_corpus")
     """
 
-    def __init__(self, lang1, lang2,
-                 word2x=None, y2word=None, x2ys=None, custom_savedir=None):
-        self.lang1 = lang1
-        self.lang2 = lang2
+    def __init__(self, lang1=None, lang2=None, path=None):
+        """Loads this object with a custom-built bilingual lexicon.
 
-        if all(d is not None for d in [word2x, y2word, x2ys]):
-            # load a custom-built word2word bilingual lexicon
-            self.word2x, self.y2word, self.x2ys = word2x, y2word, x2ys
-        elif any(d is not None for d in [word2x, y2word, x2ys]):
-            raise ValueError(
-                f"custom bilingual lexicon is only partially provided. "
-                f"use Word2word.make() or Word2word.load() to "
-                f"properly build or load custom lexicons.")
-        else:
-            # default: download/load the word2word dataset
-            self.word2x, self.y2word, self.x2ys = download_or_load(
-                lang1, lang2, custom_savedir
-            )
+        savedir is the directory containing {lang1}-{lang2}.pkl files
+        built from the make function.
+        """
+        if not path:
+            if lang1 and lang2:
+                savedir = get_savedir()
+                path = os.path.join(savedir, f"{lang1}-{lang2}.json")
 
-        # lazily keep summary statistics of the learned bilingual lexicon
-        self.summary = {}
+            else:
+                 raise ValueError("you have to define either correct path or lang1 and lang2.")
+
+        assert os.path.exists(path), f"processed lexicon file not found at {path}"
+        with open(path, "r", encoding="utf-8") as f:
+            data = load(f)
+
+        self.lang1 = data["src_lang"]
+        self.lang2 = data["tgt_lang"]
+
+        print(f"Loaded word2word custom bilingual lexicon from {path}")
+
+        self.word2x = data["src_vocab"]
+        self.word2y = data["tgt_vocab"]
+        self.y2word = {y:x for x,y in self.word2y.items()}
+
+        # Rebuild translations into list of (target, score) tuples
+        x2ys = {}
+        for src, entries in data["translations"].items():
+            l = []
+            for entry in entries:
+                key = next(iter(entry))
+                l.append((self.word2y[key], entry[key]))
+
+            x2ys[self.word2x[src]] = l
+        self.x2ys = x2ys
 
     def __call__(self, query, n_best=5):
         """Retrieve top-k word translations for the query word."""
@@ -102,8 +111,8 @@ class Word2word:
 
         print("Step 1. Load tokenizers and build dataset")
         lang1, lang2 = sorted([lang1, lang2])
-        tokenizer1 = load_tokenizer(lang1)
-        tokenizer2 = load_tokenizer(lang2)
+        tokenizer1 = load_word_tokenizer(lang1)
+        tokenizer2 = load_word_tokenizer(lang2)
         dataset = build_dataset(lang1, lang2, tokenizer1, tokenizer2)
 
         # input savedir if provided, else datapref (custom data location);
@@ -175,8 +184,6 @@ class Word2word:
                     norm_translations[id2word_src[int(src_id)]] = []
                     continue
                 
-
-
                 norm_translations[id2word_src[int(src_id)]] = [
                     {id2word_tgt[int(tgt)]: float(score)}
                     for tgt, score in tgts
@@ -215,35 +222,3 @@ class Word2word:
             id2word_src=y2word,
             id2word_tgt=x2word
         )
-
-    @classmethod
-    def load(cls, lang1, lang2):
-        """Loads this object with a custom-built bilingual lexicon.
-
-        savedir is the directory containing {lang1}-{lang2}.pkl files
-        built from the make function.
-        """
-        savedir = get_savedir()
-        path = os.path.join(savedir, f"{lang1}-{lang2}.json")
-        assert os.path.exists(path), \
-            f"processed lexicon file not found at {path}"
-        with open(path, "r", encoding="utf-8") as f:
-            data = load(f)
-
-        print(f"Loaded word2word custom bilingual lexicon from {path}")
-
-        word2x = data["src_vocab"]
-        word2y = data["tgt_vocab"]
-        y2word = {y:x for x,y in word2y.items()}
-
-        # Rebuild translations into list of (target, score) tuples
-        x2ys = {}
-        for src, entries in data["translations"].items():
-            l = []
-            for entry in entries:
-                key = next(iter(entry))
-                l.append((word2y[key], entry[key]))
-
-            x2ys[word2x[src]] = l
-
-        return cls(data["src_lang"], data["tgt_lang"], word2x, y2word, x2ys)

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-r"""token2token
+r"""word2word
 """
 from __future__ import absolute_import
 
-from .token2token import Token2Token
+from .word2word import Word2word
+from .token2token import Token2token

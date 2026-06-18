@@ -1,53 +1,50 @@
 # -*- coding: utf-8 -*-
-
 from collections import Counter, defaultdict
-from itertools import chain, islice, product, repeat
-from multiprocessing import Pool
+from itertools import chain, product
 import operator
-import re
 from tqdm import tqdm
+from transformers import AutoTokenizer
 
 
-def load_tokenizer(lang): #TODO
-    tokenizer = None
-
+def load_hf_tokenizer(name):
+    tokenizer = AutoTokenizer.from_pretrained(name)
     return tokenizer
 
 
-def word_segment(sent, tokenizer): #TODO
-    words = tokenizer.tokenize(sent)
-    return words
+def load_word_tokenizer(lang):
+    if lang == "ko":
+        from konlpy.tag import Mecab
+        tokenizer = Mecab()
+    elif lang == "ja":
+        import Mykytea
+        opt = "-model jp-0.4.7-1.mod"
+        tokenizer = Mykytea.Mykytea(opt)
+    elif lang == "zh_cn":
+        import Mykytea
+        opt = "-model ctb-0.4.0-1.mod"
+        tokenizer = Mykytea.Mykytea(opt)
+    elif lang == "zh_tw":
+        import jieba
+        tokenizer = jieba
+    elif lang == "vi":
+        from pyvi import ViTokenizer
+        tokenizer = ViTokenizer
+    elif lang == "th":
+        from pythainlp.tokenize import word_tokenize
+        tokenizer = word_tokenize
+    elif lang == "ar":
+        import pyarabic.araby as araby
+        tokenizer = araby
+    else:
+        from nltk.tokenize import ToktokTokenizer
+        tokenizer = ToktokTokenizer()
+    return tokenizer
 
 
-def process_line(line, lang, tokenizer, cased): #TODO
-    """Strip, uncase (optionally), and tokenize line.
-
-    multiprocessing helper for get_sents()."""
-    line = line.strip() if cased else line.strip().lower()
-    return word_segment(line, lang, tokenizer)
-
-
-def get_sents(fin, lang, tokenizer, cased, n_lines, num_workers=8): #TODO
-    """Load parallel corpus and segment words using multiprocessing."""
-
-    with open(fin, encoding='utf-8') as f:
-        lines = islice(f, n_lines)
-        if num_workers <= 1:
-            return [process_line(line, lang, tokenizer, cased)
-                    for line in lines]
-        else:
-            print(f"Entering multiprocessing with {num_workers} workers...")
-            with Pool(num_workers) as p:
-                return p.starmap(
-                    process_line,
-                    zip(lines, repeat(lang), repeat(tokenizer), repeat(cased))
-                )
-
-
-def get_vocab(sents): #TODO
+def get_vocab(dataset, column):
     word2idx, idx2word, idx2cnt = dict(), dict(), dict()
-
-    word2cnt = Counter(tqdm(list(chain.from_iterable(sents)))).most_common()
+    X = [ex[column] for ex in dataset]
+    word2cnt = Counter(list(chain.from_iterable(X))).most_common()
     word2cnt.sort(key=operator.itemgetter(1, 0), reverse=True)
     for idx, (word, cnt) in enumerate(tqdm(word2cnt)):
         word2idx[word] = idx
@@ -57,7 +54,7 @@ def get_vocab(sents): #TODO
     return word2idx, idx2word, idx2cnt
 
 
-def update_dicts(sents1, sents2, vocab1, vocab2, cutoff):
+def update_dicts(dataset, lang1, lang2, vocab1, vocab2, cutoff, n_lines, save_pmi):
     """Get monolingual and cross-lingual count dictionaries.
 
     'cutoff' determines how many collocates are considered in each language.
@@ -75,10 +72,17 @@ def update_dicts(sents1, sents2, vocab1, vocab2, cutoff):
     y_y_dict = build_ddi()
     x_y_dict = build_ddi()
     y_x_dict = build_ddi()
+    seqlens1 = []
+    seqlens2 = []
 
-    for sent1, sent2 in tqdm(zip(sents1, sents2), total=len(sents1)):
-        xs = [vocab1[wx] for wx in sent1 if wx in vocab1]
-        ys = [vocab2[wy] for wy in sent2 if wy in vocab2]
+    for ex in tqdm(dataset, total=n_lines):
+
+        if save_pmi:
+            seqlens1.append(len(ex[lang1]))
+            seqlens2.append(len(ex[lang2]))
+
+        xs = [vocab1[wx] for wx in ex[lang1] if wx in vocab1]
+        ys = [vocab2[wy] for wy in ex[lang2] if wy in vocab2]
 
         for xx1, xx2 in u2_iter(xs, xs, same_ignore=True, cut_t2=cutoff):
             x_x_dict[xx1][xx2] += 1
@@ -92,5 +96,7 @@ def update_dicts(sents1, sents2, vocab1, vocab2, cutoff):
     def ddi2dict(ddi):
         return {k: dict(v) for k, v in ddi.items()}
 
-    return tuple(ddi2dict(ddi)
-                 for ddi in [x_x_dict, y_y_dict, x_y_dict, y_x_dict])
+    return tuple(
+        list(ddi2dict(ddi) for ddi in [x_x_dict, y_y_dict, x_y_dict, y_x_dict])
+        + [seqlens1, seqlens2]
+    )

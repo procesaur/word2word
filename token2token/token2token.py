@@ -1,76 +1,85 @@
 # -*- coding: utf-8 -*-
-
 import os
-import pickle
+from json import dump, load
 from time import time
 
-from token2token.utils import (
-    download_or_load, download_os2018, get_savedir
-)
-from token2token.tokenization import (
-    load_tokenizer, get_sents, get_vocab, update_dicts
-)
-from token2token.methods import (
-    rerank, rerank_mp, get_trans_co, get_trans_pmi
-)
+from token2token.utils import build_dataset, get_savedir
+from token2token.tokenization import load_hf_tokenizer, get_vocab, update_dicts
+from token2token.methods import rerank, rerank_mp, get_trans_pmi
 
 
-class Token2Token:
+class Token2token:
     """The token2token class.
 
     Usage:
-        from token2token import Token2Token
+        from token2token import Token2token
 
-        # Download and load a pre-computed bilingual token mapping
-        en2fr = Token2Token("en", "fr")
+        # Download and load a pre-computed bilingual lexicon
+        en2fr = Token2token("en", "fr")
         print(en2fr("apple"))
         # out: ['pomme', 'pommes', 'pommier', 'tartes', 'fleurs']
 
-        # Build a custom bilingual token mapping
+        # Build a custom bilingual lexicon
         # (requires two aligned files, e.g., my_corpus.en, my_corpus.fr)
-        my_en2fr = Token2Token.make("en", "fr", "my_corpus")
+        my_en2fr = Token2token.make("en", "fr", "my_corpus")
     """
 
-    def __init__(self, lang1, lang2, #TODO Trenutno skida sa URL 
-                 token2x=None, y2token=None, x2ys=None, custom_savedir=None):
-        self.lang1 = lang1
-        self.lang2 = lang2
+    def __init__(self, lang1=None, lang2=None, path=None):
+        """Loads this object with a custom-built bilingual lexicon.
 
-        if all(d is not None for d in [token2x, y2token, x2ys]):
-            # load a custom-built token2token bilingual tool mapping
-            self.token2x, self.y2token, self.x2ys = token2x, y2token, x2ys
-        elif any(d is not None for d in [token2x, y2token, x2ys]):
-            raise ValueError(
-                f"custom bilingual tool mapping is only partially provided. "
-                f"use Token2Token.make() or Token2Token.load() to "
-                f"properly build or load custom lexicons.")
-        else:
-            # default: download/load the token2token dataset
-            self.token2x, self.y2token, self.x2ys = download_or_load(
-                lang1, lang2, custom_savedir
-            )
+        savedir is the directory containing {lang1}-{lang2}.pkl files
+        built from the make function.
+        """
+        if not path:
+            if lang1 and lang2:
+                savedir = get_savedir()
+                path = os.path.join(savedir, f"{lang1}-{lang2}.json")
 
-        # lazily keep summary statistics of the learned bilingual tool mapping
-        self.summary = {}
+            else:
+                 raise ValueError("you have to define either correct path or lang1 and lang2.")
+
+        assert os.path.exists(path), f"processed lexicon file not found at {path}"
+        with open(path, "r", encoding="utf-8") as f:
+            data = load(f)
+
+        self.lang1 = data["src_lang"]
+        self.lang2 = data["tgt_lang"]
+
+        print(f"Loaded token2token custom bilingual lexicon from {path}")
+
+        self.token2x = data["src_vocab"]
+        self.token2y = data["tgt_vocab"]
+        self.y2token = {y:x for x,y in self.token2y.items()}
+
+        # Rebuild translations into list of (target, score) tuples
+        x2ys = {}
+        for src, entries in data["translations"].items():
+            l = []
+            for entry in entries:
+                key = next(iter(entry))
+                l.append((self.token2y[key], entry[key]))
+
+            x2ys[self.token2x[src]] = l
+        self.x2ys = x2ys
 
     def __call__(self, query, n_best=5):
         """Retrieve top-k token translations for the query token."""
         try:
             x = self.token2x[query]
             ys = self.x2ys[x]
-            tokens = [self.y2token[y] for y in ys]
+            tokens = {self.y2token[y[0]] : y[1] for y in ys[:n_best]}
         except KeyError:
             raise KeyError(
-                f"query token {query} not found in the bilingual tool mapping."
+                f"query token {query} not found in the bilingual lexicon."
             )
-        return tokens[:n_best]
+        return tokens
 
     def __len__(self):
         """Return the number of source tokens for which translation exists."""
         return len(self.x2ys)
 
     def compute_summary(self):
-        """Compute basic summaries for the bilingual tool mapping."""
+        """Compute basic summaries for the bilingual lexicon."""
         n_unique_ys = len(set([y for ys in self.x2ys.values() for y in ys]))
         n_ys = [len(ys) for ys in self.x2ys.values()]
         self.summary = {
@@ -88,51 +97,25 @@ class Token2Token:
             cls,
             lang1: str,
             lang2: str,
+            tokenizer1: str,
+            tokenizer2: str,
             datapref: str = None,
-            n_lines: int = 100000000,
+            n_lines: int = 1000000,
             cutoff: int = 5000,
             rerank_width: int = 100,
             rerank_impl: str = "multiprocessing",
-            cased: bool = True,
             n_translations: int = 10,
-            save_cooccurrence: bool = False,
             save_pmi: bool = False,
             savedir: str = None,
             num_workers: int = 16,
     ):
-        """Build a bilingual tool mapping using a parallel corpus."""
+        """Build a bilingual lexicon using a parallel corpus."""
 
-        print("Step 0. Check files")
+        print("Step 1. Load tokenizers and build dataset")
         lang1, lang2 = sorted([lang1, lang2])
-        if datapref:
-            lang1_file, lang2_file = [
-                f"{datapref}.{lang}" for lang in [lang1, lang2]
-            ]
-            assert os.path.exists(lang1_file), \
-                f"custom parallel corpus file missing at {datapref}.{lang1}"
-            assert os.path.exists(lang2_file), \
-                f"custom parallel corpus file missing at {datapref}.{lang2}"
-        else:
-            lang1_file, lang2_file = download_os2018(lang1, lang2)
-
-        print("Step 1. Load tokenizer")
-        tokenizer1 = load_tokenizer(lang1)
-        tokenizer2 = load_tokenizer(lang2)
-
-        t0 = time()
-        print("Step 2. Constructing sentences")
-        sents1 = get_sents(
-            lang1_file, lang1, tokenizer1, cased, n_lines, num_workers
-        )
-        sents2 = get_sents(
-            lang2_file, lang2, tokenizer2, cased, n_lines, num_workers
-        )
-        print(f"Time taken for step 2: {time() - t0:.2f}s")
-
-        assert len(sents1) == len(sents2), (
-            f"{lang1} and {lang2} files must have the same number of lines.\n"
-            f"({lang1}: {len(sents1)} lines, {lang2}: {len(sents2)} lines)"
-        )
+        tokenizer1 = load_hf_tokenizer(tokenizer1)
+        tokenizer2 = load_hf_tokenizer(tokenizer2)
+        dataset = build_dataset(lang1, lang2, tokenizer1, tokenizer2)
 
         # input savedir if provided, else datapref (custom data location);
         # system default otherwise
@@ -140,13 +123,14 @@ class Token2Token:
 
         print("Step 3. Compute vocabularies")
         # token <-> index
-        token2x, x2token, x2cnt = get_vocab(sents1)
-        token2y, y2token, y2cnt = get_vocab(sents2)
+
+        token2x, x2token, x2cnt = get_vocab(dataset.take(n_lines), lang1)
+        token2y, y2token, y2cnt = get_vocab(dataset.take(n_lines), lang2)
 
         print("Step 4. Update count dictionaries")
         # monolingual and cross-lingual dictionaries
-        x2xs, y2ys, x2ys, y2xs = update_dicts(
-            sents1, sents2, token2x, token2y, cutoff
+        x2xs, y2ys, x2ys, y2xs, seqlens1, seqlens2 = update_dicts(
+            dataset.take(n_lines), lang1, lang2, token2x, token2y, cutoff, n_lines, save_pmi
         )
 
         t0 = time()
@@ -167,26 +151,13 @@ class Token2Token:
         print(f"Time taken for step 5: {time() - t0:.2f}s")
 
         print("Saving...")
-        Token2Token.save(lang1, lang2, savedir, token2x, token2y, x2token,
+        Token2token.save(lang1, lang2, savedir, token2x, token2y, x2token,
                        x2ys_cpe, y2token, y2xs_cpe)
 
-        if save_cooccurrence:
-            print("Step 5-1. Translation using co-occurrence counts")
-            subdir = os.path.join(savedir, "co")
-            os.makedirs(subdir, exist_ok=True)
-
-            x2ys_co = get_trans_co(x2ys, n_translations)
-            y2xs_co = get_trans_co(y2xs, n_translations)
-            Token2Token.save(lang1, lang2, subdir, token2x, token2y, x2token,
-                           x2ys_co, y2token, y2xs_co)
-
         if save_pmi:
-            print("Step 5-2. Translation using PMI scores")
+            print("Step 5-1. Translation using PMI scores")
             subdir = os.path.join(savedir, "pmi")
             os.makedirs(subdir, exist_ok=True)
-
-            seqlens1 = [len(sent) for sent in sents1]
-            seqlens2 = [len(sent) for sent in sents2]
             Nx = sum(seqlens1)
             Ny = sum(seqlens2)
             Nxy = sum([seqlen_x * seqlen_y
@@ -197,7 +168,7 @@ class Token2Token:
             y2xs_pmi = get_trans_pmi(y2xs, y2cnt, x2cnt, Nxy, Ny, Nx,
                                      rerank_width, n_translations)
 
-            Token2Token.save(lang1, lang2, subdir, token2x, token2y, x2token,
+            Token2token.save(lang1, lang2, subdir, token2x, token2y, x2token,
                            x2ys_pmi, y2token, y2xs_pmi)
 
         print("Done!")
@@ -205,22 +176,51 @@ class Token2Token:
 
     @staticmethod
     def save(lang1, lang2, savedir, token2x, token2y, x2token, x2ys, y2token, y2xs):
-        with open(os.path.join(savedir, f"{lang1}-{lang2}.pkl"), "wb") as f:
-            pickle.dump((token2x, y2token, x2ys), f)
-        with open(os.path.join(savedir, f"{lang2}-{lang1}.pkl"), "wb") as f:
-            pickle.dump((token2y, x2token, y2xs), f)
 
-    @classmethod
-    def load(cls, lang1, lang2, savedir):
-        """Loads this object with a custom-built bilingual tool mapping.
+        def _dump_json(path, src_vocab, tgt_vocab, translations, src_lang, tgt_lang,
+                    id2token_src, id2token_tgt):
+            """Helper to write bilingual dictionary JSON with tokens instead of IDs."""
+            norm_translations = {}
+            for src_id, tgts in translations.items():
+                if not tgts:
+                    norm_translations[id2token_src[int(src_id)]] = []
+                    continue
+                
+                norm_translations[id2token_src[int(src_id)]] = [
+                    {id2token_tgt[int(tgt)]: float(score)}
+                    for tgt, score in tgts
+                ]
 
-        savedir is the directory containing {lang1}-{lang2}.pkl files
-        built from the make function.
-        """
-        path = os.path.join(savedir, f"{lang1}-{lang2}.pkl")
-        assert os.path.exists(path), \
-            f"processed lexicon file not found at {path}"
-        with open(path, "rb") as f:
-            token2x, y2token, x2ys = pickle.load(f)
-        print(f"Loaded token2token custom bilingual tool mapping from {path}")
-        return cls(lang1, lang2, token2x, y2token, x2ys)
+            data = {
+                "src_lang": src_lang,
+                "tgt_lang": tgt_lang,
+                "src_vocab": src_vocab,
+                "tgt_vocab": tgt_vocab,
+                "translations": norm_translations
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                dump(data, f, ensure_ascii=False, indent=2)
+
+        # lang1 → lang2
+        _dump_json(
+            os.path.join(savedir, f"{lang1}-{lang2}.json"),
+            src_vocab=token2x,
+            tgt_vocab=token2y,
+            translations=x2ys,
+            src_lang=lang1,
+            tgt_lang=lang2,
+            id2token_src=x2token,
+            id2token_tgt=y2token
+        )
+
+        # lang2 → lang1
+        _dump_json(
+            os.path.join(savedir, f"{lang2}-{lang1}.json"),
+            src_vocab=token2y,
+            tgt_vocab=token2x,
+            translations=y2xs,
+            src_lang=lang2,
+            tgt_lang=lang1,
+            id2token_src=y2token,
+            id2token_tgt=x2token
+        )

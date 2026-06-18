@@ -19,8 +19,8 @@ Authors:
 
 import argparse
 
-from word2word import Word2word
-from token2token import Token2Token
+from token2token import Word2word
+from token2token import Token2token
 
 
 def main():
@@ -63,7 +63,7 @@ def main():
 
 
 if __name__ == "__main__":
-    Word2word.make(lang1="sr", lang2="hr")
-    srhr = Word2word.load(lang1="sr", lang2="hr")
+    #Word2word.make(lang1="sr", lang2="hr")
+    srhr = Word2word(lang1="sr", lang2="hr")
     print(srhr("fudbal"))
     #main()
